@@ -1,3 +1,4 @@
+import { stringify } from 'querystring';
 /**
  * @license
  * Copyright Google Inc. All Rights Reserved.
@@ -9,7 +10,7 @@
 import * as ts from 'typescript/lib/tsserverlibrary';
 import * as lsp from 'vscode-languageserver';
 
-import {tsCompletionEntryToLspCompletionItem} from './completion';
+import {readNgCompletionData, tsCompletionEntryToLspCompletionItem} from './completion';
 import {tsDiagnosticToLspDiagnostic} from './diagnostic';
 import {Logger} from './logger';
 import {projectLoadingNotification} from './protocol';
@@ -98,6 +99,7 @@ export class Session {
     conn.onDefinition(p => this.onDefinition(p));
     conn.onHover(p => this.onHover(p));
     conn.onCompletion(p => this.onCompletion(p));
+    conn.onCompletionResolve(p => this.onCompletionResolve(p));
   }
 
   /**
@@ -235,7 +237,7 @@ export class Session {
         completionProvider: {
           // The server does not provide support to resolve additional information
           // for a completion item.
-          resolveProvider: false,
+          resolveProvider: true,
           triggerCharacters: ['<', '.', '*', '[', '(', '$', '|']
         },
         definitionProvider: true,
@@ -453,8 +455,50 @@ export class Session {
     if (!completions) {
       return;
     }
+    const data = {isNgData: true, filePath, position};
     return completions.entries.map(
         (e) => tsCompletionEntryToLspCompletionItem(e, position, scriptInfo));
+  }
+
+  private onCompletionResolve(item: lsp.CompletionItem): lsp.CompletionItem {
+    const data = readNgCompletionData(item);
+    if (data === null) {
+      // This item wasn't tagged with Angular LS completion data - it probably didn't originate from
+      // this language service.
+      return item;
+    }
+
+    const {filePath, position} = data;
+    const scriptInfo = this.projectService.getScriptInfo(filePath);
+    if (scriptInfo === undefined) {
+      return item;
+    }
+    const {fileName} = scriptInfo;
+    const langSvc = this.getDefaultLanguageService(scriptInfo);
+    if (langSvc === undefined) {
+      return item;
+    }
+    const offset = lspPositionToTsPosition(scriptInfo, position);
+    const details = langSvc.getCompletionEntryDetails(
+        fileName, offset, item.insertText ?? item.label, undefined, undefined, undefined);
+    if (details === undefined) {
+      return item;
+    }
+
+    const {kind, kindModifiers, displayParts, documentation} = details;
+    let desc = kindModifiers ? kindModifiers + ' ' : '';
+    if (displayParts) {
+      // displayParts does not contain info about kindModifiers
+      // but displayParts does contain info about kind
+      desc += displayParts.map(dp => dp.text).join('');
+    } else {
+      desc += kind;
+    }
+    item.detail = desc;
+    item.documentation = documentation?.map(d => d.text).join('');
+
+
+    return item;
   }
 
   /**
